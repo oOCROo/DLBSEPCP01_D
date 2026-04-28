@@ -14,10 +14,26 @@ variable "project_name" {
   default     = "globaltrails"
 }
 
+variable "environment" {
+  description = "Deployment-Umgebung (dev, staging, prod)"
+  type        = string
+  default     = "dev"
+
+  validation {
+    condition     = contains(["dev", "staging", "prod"], var.environment)
+    error_message = "Die Umgebung muss 'dev', 'staging' oder 'prod' sein."
+  }
+}
+
 variable "vpc_cidr" {
   description = "CIDR-Block fuer die VPC"
   type        = string
   default     = "10.0.0.0/16"
+
+  validation {
+    condition     = can(cidrnetmask(var.vpc_cidr))
+    error_message = "Der Wert fuer vpc_cidr muss ein gueltiger CIDR-Block sein (z. B. 10.0.0.0/16)."
+  }
 }
 
 variable "public_subnet_cidrs" {
@@ -71,11 +87,21 @@ variable "ssh_public_key_path" {
 variable "admin_ip" {
   description = "IP-Adresse des Administrators fuer SSH-Zugriff (CIDR)"
   type        = string
-  default     = "0.0.0.0/0" # In Produktion: spezifische Admin-IP verwenden
+  default     = "192.168.1.100/32" # Dummy-IP, in Prod durch echte VPN/Admin-IP ersetzen
+
+  validation {
+    condition     = can(cidrnetmask(var.admin_ip)) && var.admin_ip != "0.0.0.0/0"
+    error_message = "Die admin_ip darf aus Sicherheitsgruenden nicht 0.0.0.0/0 sein und muss gueltiges CIDR-Format haben."
+  }
 }
 
 variable "s3_bucket_name" {
   description = "Name des S3-Buckets fuer statische Inhalte"
   type        = string
   default     = "globaltrails-static-assets"
+
+  validation {
+    condition     = length(var.s3_bucket_name) >= 3 && length(var.s3_bucket_name) <= 63 && can(regex("^[a-z0-9.-]+$", var.s3_bucket_name))
+    error_message = "Der S3-Bucket-Name darf nur Kleinbuchstaben, Zahlen, Punkte und Bindestriche enthalten."
+  }
 }

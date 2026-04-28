@@ -3,6 +3,11 @@
 # GlobalTrails GmbH – Hochverfuegbare, globale Landingpage
 # ============================================================
 
+locals {
+  # Validierung: Anzahl Subnetze muss Anzahl AZs entsprechen
+  validate_az_subnet_length = length(var.public_subnet_cidrs) == length(var.availability_zones) ? true : file("FEHLER: public_subnet_cidrs und availability_zones muessen gleich lang sein.")
+}
+
 # ---------- NETZWERK (VPC, Subnetze, Internet Gateway) ----------
 
 resource "aws_vpc" "main" {
@@ -10,12 +15,12 @@ resource "aws_vpc" "main" {
   enable_dns_support   = true
   enable_dns_hostnames = true
 
-  tags = { Name = "${var.project_name}-vpc" }
+  tags = { Name = "${var.project_name}-${var.environment}-vpc" }
 }
 
 resource "aws_internet_gateway" "main" {
   vpc_id = aws_vpc.main.id
-  tags   = { Name = "${var.project_name}-igw" }
+  tags   = { Name = "${var.project_name}-${var.environment}-igw" }
 }
 
 resource "aws_subnet" "public" {
@@ -25,7 +30,7 @@ resource "aws_subnet" "public" {
   availability_zone       = var.availability_zones[count.index]
   map_public_ip_on_launch = true
 
-  tags = { Name = "${var.project_name}-public-${count.index + 1}" }
+  tags = { Name = "${var.project_name}-${var.environment}-public-${count.index + 1}" }
 }
 
 resource "aws_route_table" "public" {
@@ -36,7 +41,7 @@ resource "aws_route_table" "public" {
     gateway_id = aws_internet_gateway.main.id
   }
 
-  tags = { Name = "${var.project_name}-public-rt" }
+  tags = { Name = "${var.project_name}-${var.environment}-public-rt" }
 }
 
 resource "aws_route_table_association" "public" {
@@ -48,44 +53,43 @@ resource "aws_route_table_association" "public" {
 # ---------- SICHERHEIT (Security Groups) ----------
 
 resource "aws_security_group" "alb_sg" {
-  name_prefix = "${var.project_name}-alb-"
+  name_prefix = "${var.project_name}-${var.environment}-alb-"
   vpc_id      = aws_vpc.main.id
   description = "Security Group fuer den Application Load Balancer"
 
-  # HTTPS von ueberall (Port 443)
   ingress {
     from_port   = 443
     to_port     = 443
     protocol    = "tcp"
     cidr_blocks = ["0.0.0.0/0"]
-    description = "HTTPS-Zugriff"
+    description = "HTTPS-Zugriff weltweit"
   }
 
-  # HTTP nur fuer Redirect auf HTTPS (Port 80)
   ingress {
     from_port   = 80
     to_port     = 80
     protocol    = "tcp"
     cidr_blocks = ["0.0.0.0/0"]
-    description = "HTTP-Redirect auf HTTPS"
+    description = "HTTP-Redirect auf HTTPS weltweit"
   }
 
+  # Egress restriktiv: ALB muss nur mit dem internen VPC (Targets) kommunizieren
   egress {
-    from_port   = 0
-    to_port     = 0
-    protocol    = "-1"
-    cidr_blocks = ["0.0.0.0/0"]
+    from_port   = 80
+    to_port     = 80
+    protocol    = "tcp"
+    cidr_blocks = [var.vpc_cidr]
+    description = "Traffic zu den EC2-Targets im VPC"
   }
 
-  tags = { Name = "${var.project_name}-alb-sg" }
+  tags = { Name = "${var.project_name}-${var.environment}-alb-sg" }
 }
 
 resource "aws_security_group" "ec2_sg" {
-  name_prefix = "${var.project_name}-ec2-"
+  name_prefix = "${var.project_name}-${var.environment}-ec2-"
   vpc_id      = aws_vpc.main.id
   description = "Security Group fuer EC2-Instanzen"
 
-  # HTTP nur vom ALB (interner Traffic)
   ingress {
     from_port       = 80
     to_port         = 80
@@ -94,48 +98,57 @@ resource "aws_security_group" "ec2_sg" {
     description     = "HTTP vom ALB"
   }
 
-  # SSH nur von Admin-IP (nicht global offen!)
   ingress {
     from_port   = 22
     to_port     = 22
     protocol    = "tcp"
     cidr_blocks = [var.admin_ip]
-    description = "SSH-Zugriff nur fuer Administrator"
+    description = "SSH-Zugriff nur fuer validierte Admin-IP"
+  }
+
+  # Egress restriktiv: Nur HTTP/HTTPS fuer OS-Updates (yum)
+  egress {
+    from_port   = 80
+    to_port     = 80
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+    description = "Erlaubt ausgehenden HTTP-Traffic fuer Updates"
   }
 
   egress {
-    from_port   = 0
-    to_port     = 0
-    protocol    = "-1"
+    from_port   = 443
+    to_port     = 443
+    protocol    = "tcp"
     cidr_blocks = ["0.0.0.0/0"]
+    description = "Erlaubt ausgehenden HTTPS-Traffic fuer Updates"
   }
 
-  tags = { Name = "${var.project_name}-ec2-sg" }
+  tags = { Name = "${var.project_name}-${var.environment}-ec2-sg" }
 }
 
 # ---------- PKI / SSH KEY PAIR ----------
 
 resource "aws_key_pair" "deployer" {
-  key_name   = "${var.project_name}-deployer-key"
+  key_name   = "${var.project_name}-${var.environment}-deployer-key"
   public_key = file(var.ssh_public_key_path)
 
-  tags = { Name = "${var.project_name}-ssh-key" }
+  tags = { Name = "${var.project_name}-${var.environment}-ssh-key" }
 }
 
 # ---------- APPLICATION LOAD BALANCER ----------
 
 resource "aws_lb" "main" {
-  name               = "${var.project_name}-alb"
+  name               = "${var.project_name}-${var.environment}-alb"
   internal           = false
   load_balancer_type = "application"
   security_groups    = [aws_security_group.alb_sg.id]
   subnets            = aws_subnet.public[*].id
 
-  tags = { Name = "${var.project_name}-alb" }
+  tags = { Name = "${var.project_name}-${var.environment}-alb" }
 }
 
 resource "aws_lb_target_group" "main" {
-  name     = "${var.project_name}-tg"
+  name     = "${var.project_name}-${var.environment}-tg"
   port     = 80
   protocol = "HTTP"
   vpc_id   = aws_vpc.main.id
@@ -149,7 +162,7 @@ resource "aws_lb_target_group" "main" {
     interval            = 30
   }
 
-  tags = { Name = "${var.project_name}-tg" }
+  tags = { Name = "${var.project_name}-${var.environment}-tg" }
 }
 
 resource "aws_lb_listener" "http" {
@@ -170,26 +183,25 @@ resource "aws_lb_listener" "http" {
 # ---------- EC2 LAUNCH TEMPLATE & AUTO SCALING GROUP ----------
 
 resource "aws_launch_template" "web" {
-  name_prefix   = "${var.project_name}-lt-"
+  name_prefix   = "${var.project_name}-${var.environment}-lt-"
   image_id      = var.ami_id
   instance_type = var.instance_type
   key_name      = aws_key_pair.deployer.key_name
 
   vpc_security_group_ids = [aws_security_group.ec2_sg.id]
 
-  # User Data: Nur Bootstrapping – KEINE Nutzerdaten (DSGVO-konform)
   user_data = base64encode(file("${path.module}/userdata.sh"))
 
   tag_specifications {
     resource_type = "instance"
     tags = {
-      Name = "${var.project_name}-web-instance"
+      Name = "${var.project_name}-${var.environment}-web-instance"
     }
   }
 }
 
 resource "aws_autoscaling_group" "web" {
-  name                = "${var.project_name}-asg"
+  name                = "${var.project_name}-${var.environment}-asg"
   desired_capacity    = var.desired_capacity
   min_size            = var.min_instances
   max_size            = var.max_instances
@@ -203,14 +215,13 @@ resource "aws_autoscaling_group" "web" {
 
   tag {
     key                 = "Name"
-    value               = "${var.project_name}-asg-instance"
+    value               = "${var.project_name}-${var.environment}-asg-instance"
     propagate_at_launch = true
   }
 }
 
-# Auto Scaling Policy (CPU-basiert)
 resource "aws_autoscaling_policy" "scale_up" {
-  name                   = "${var.project_name}-scale-up"
+  name                   = "${var.project_name}-${var.environment}-scale-up"
   scaling_adjustment     = 1
   adjustment_type        = "ChangeInCapacity"
   cooldown               = 300
@@ -218,7 +229,7 @@ resource "aws_autoscaling_policy" "scale_up" {
 }
 
 resource "aws_autoscaling_policy" "scale_down" {
-  name                   = "${var.project_name}-scale-down"
+  name                   = "${var.project_name}-${var.environment}-scale-down"
   scaling_adjustment     = -1
   adjustment_type        = "ChangeInCapacity"
   cooldown               = 300
@@ -228,9 +239,10 @@ resource "aws_autoscaling_policy" "scale_down" {
 # ---------- S3 BUCKET (Statische Inhalte) ----------
 
 resource "aws_s3_bucket" "static" {
-  bucket = var.s3_bucket_name
+  # Bucketnamen muessen global eindeutig sein, Environment anhaengen hilft
+  bucket = "${var.s3_bucket_name}-${var.environment}"
 
-  tags = { Name = "${var.project_name}-static-bucket" }
+  tags = { Name = "${var.project_name}-${var.environment}-static-bucket" }
 }
 
 resource "aws_s3_bucket_public_access_block" "static" {
@@ -242,9 +254,8 @@ resource "aws_s3_bucket_public_access_block" "static" {
   restrict_public_buckets = true
 }
 
-# Origin Access Control fuer CloudFront -> S3
 resource "aws_cloudfront_origin_access_control" "s3_oac" {
-  name                              = "${var.project_name}-s3-oac"
+  name                              = "${var.project_name}-${var.environment}-s3-oac"
   origin_access_control_origin_type = "s3"
   signing_behavior                  = "always"
   signing_protocol                  = "sigv4"
@@ -277,16 +288,14 @@ resource "aws_s3_bucket_policy" "static" {
 resource "aws_cloudfront_distribution" "main" {
   enabled             = true
   default_root_object = "index.html"
-  comment             = "GlobalTrails CDN Distribution"
+  comment             = "GlobalTrails CDN Distribution (${var.environment})"
 
-  # Origin 1: S3 fuer statische Inhalte
   origin {
     domain_name              = aws_s3_bucket.static.bucket_regional_domain_name
     origin_id                = "S3-Static"
     origin_access_control_id = aws_cloudfront_origin_access_control.s3_oac.id
   }
 
-  # Origin 2: ALB fuer dynamische Inhalte
   origin {
     domain_name = aws_lb.main.dns_name
     origin_id   = "ALB-Dynamic"
@@ -299,7 +308,6 @@ resource "aws_cloudfront_distribution" "main" {
     }
   }
 
-  # Standard-Verhalten: Statische Inhalte via S3
   default_cache_behavior {
     allowed_methods        = ["GET", "HEAD"]
     cached_methods         = ["GET", "HEAD"]
@@ -316,7 +324,6 @@ resource "aws_cloudfront_distribution" "main" {
     max_ttl     = 86400
   }
 
-  # Zusaetzliches Verhalten: Dynamische Inhalte via ALB
   ordered_cache_behavior {
     path_pattern           = "/api/*"
     allowed_methods        = ["GET", "HEAD", "OPTIONS", "PUT", "POST", "PATCH", "DELETE"]
@@ -342,5 +349,5 @@ resource "aws_cloudfront_distribution" "main" {
     cloudfront_default_certificate = true
   }
 
-  tags = { Name = "${var.project_name}-cdn" }
+  tags = { Name = "${var.project_name}-${var.environment}-cdn" }
 }
